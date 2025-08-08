@@ -2,26 +2,26 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<link rel="manifest" href="manifest.webmanifest">
-<link rel="apple-touch-icon" href="icon-192.png">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black" />
 <title>Posture & Sitting Timer</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css" />
 
-<!-- MediaPipe libs -->
-<script src="https://unpkg.com/@mediapipe/camera_utils@0.3.1675466864/camera_utils.js"></script>
-<script src="https://unpkg.com/@mediapipe/drawing_utils@0.3.1675466864/drawing_utils.js"></script>
-<script src="https://unpkg.com/@mediapipe/pose@0.5.1675469404/pose.js"></script>
+<!-- MediaPipe libs (cache-busted) -->
+<script src="https://unpkg.com/@mediapipe/camera_utils@0.3.1675466864/camera_utils.js?v=9"></script>
+<script src="https://unpkg.com/@mediapipe/drawing_utils@0.3.1675466864/drawing_utils.js?v=9"></script>
+<script src="https://unpkg.com/@mediapipe/pose@0.5.1675469404/pose.js?v=9"></script>
+
 <style>
-  /* small tweak so the controls are above the fold on iPhone */
-  header { position: sticky; top: 0; background:#0f1115; z-index: 5; }
-  #status { padding:8px 12px; margin:0 12px 10px; border-radius:10px; font-size:13px; }
+  header { position: sticky; top: 0; background:#0f1115; z-index: 10; }
+  #status { padding:8px 12px; margin:10px 12px; border-radius:10px; font-size:13px; }
   #status.ok{ background:#12362f; color:#d7fff1; border:1px solid #245c4d; }
   #status.err{ background:#2b1616; color:#ffd7d7; border:1px solid #5c1f1f; }
-  .topButtons{ display:flex; gap:8px; padding:0 12px 10px; }
+  .topButtons{ display:flex; gap:8px; padding:0 12px; margin-top:-4px }
   .topButtons .btn{ flex:1; }
 </style>
 </head>
@@ -34,7 +34,7 @@
   </label>
 </header>
 
-<div id="status" class="ok">v0.2 — Ready. Tap <b>Start</b> to request camera.</div>
+<div id="status" class="ok">v0.3 — JS loaded. Tap <b>Start</b> to request camera.</div>
 <div class="topButtons">
   <button id="startBtn" class="btn accent">Start</button>
   <button id="stopBtn" class="btn">Stop</button>
@@ -81,7 +81,7 @@
       <input id="maxFlex" type="range" min="5" max="40" step="1" value="20">
     </div>
     <div class="small" style="margin-top:8px">
-      Tip: Place your iPhone ~1.5–2m in front of you at knee height. Sit side-on (45°) so the camera sees shoulders, hips, knees, and ankles.
+      Tip: Phone ~1.5–2m away at knee height. Sit ~45° to camera so it sees shoulders/hips/knees/ankles.
     </div>
   </div>
 
@@ -104,11 +104,11 @@
     </ul>
   </div>
 </main>
-<footer>v0.2 prototype · On-device processing · For guidance only</footer>
+<footer>v0.3 prototype · On-device processing · For guidance only</footer>
 
 <script>
-(() => {
-  const $ = (id) => document.getElementById(id);
+(function(){
+  const $ = id => document.getElementById(id);
   const ui = {
     status: $('status'),
     video: $('video'),
@@ -132,13 +132,12 @@
     resetBtn: $('resetBtn'),
   };
 
-  // Quick visual logger
-  const info  = (t)=>{ ui.status.className='ok'; ui.status.innerHTML=t; };
-  const error = (t)=>{ ui.status.className='err'; ui.status.innerHTML='⚠️ ' + t; console.error(t); };
+  const ok = msg => { ui.status.className='ok'; ui.status.innerHTML = msg; }
+  const err = msg => { ui.status.className='err'; ui.status.innerHTML = '⚠️ ' + msg; console.error(msg); }
 
-  // WebAudio beep (safe on iOS after user gesture)
+  // WebAudio beep (works after user gesture)
   let ac;
-  function beep() {
+  function beep(){
     if (!ui.soundToggle.checked) return;
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!ac) ac = new Ctx();
@@ -155,7 +154,7 @@
   const store = {
     get(){ return JSON.parse(localStorage.getItem('pt_logs')||'[]'); },
     add(x){ const a=store.get(); a.push(x); localStorage.setItem('pt_logs', JSON.stringify(a)); }
-  };
+  }
   function updateLastLog(){
     const a = store.get(); if (!a.length){ ui.lastLog.textContent='No logs yet.'; return; }
     const last = a[a.length-1];
@@ -177,4 +176,129 @@
     const px=(dist(lA,rA)+dist(lK,rK))/2; const pxToCm=0.8; return px*pxToCm;
   }
   function lumbarAngle(lm){
-    con
+    const L=lm[11], R=lm[12], LH=lm[23], RH=lm[24], LK=lm[25], RK=lm[26];
+    const lv=(L?.visibility||0)+(LH?.visibility||0)+(LK?.visibility||0);
+    const rv=(R?.visibility||0)+(RH?.visibility||0)+(RK?.visibility||0);
+    let sh,hip,knee; if(lv>=rv){ sh=L; hip=LH; knee=LK; } else { sh=R; hip=RH; knee=RK; }
+    if(!sh||!hip||!knee) return null; return Math.round(angle(sh,hip,knee));
+  }
+  function lateralShift(lm){
+    const shx=(lm[11]?.x + lm[12]?.x)/2, hipx=(lm[23]?.x + lm[24]?.x)/2;
+    if(!isFinite(shx)||!isFinite(hipx)) return null; return Math.round((hipx-shx)*100);
+  }
+  function postureScore(m,t){
+    let s=100;
+    if(m.baseCm!=null){ const dev=Math.max(0,m.baseCm-t.baseCm); s-=Math.min(40,dev*1.2); }
+    if(m.lumbarDeg!=null){ const over=Math.max(0,(180-m.lumbarDeg)-t.maxFlexDeg); s-=Math.min(40,over*1.5); }
+    if(m.shiftPct!=null){ s-=Math.min(20,Math.abs(m.shiftPct)*1.2); }
+    return Math.max(0,Math.min(100,Math.round(s)));
+  }
+  function chooseSuggestion(m,t){
+    if(m.baseCm!=null && m.baseCm>t.baseCm+3) return "Narrow your base: bring feet & knees closer, re-stack ribs over pelvis.";
+    if(m.lumbarDeg!=null && (180-m.lumbarDeg)>t.maxFlexDeg+5) return "Stand + brace (McGill short-stop), then re-sit tall.";
+    return "Hold steady. Small adjustments only.";
+  }
+
+  // Pose pipeline
+  let pose, camera, running=false, timerStart=null, lastAlert=0, currentIntervalMs=0;
+
+  function setAdaptiveInterval(score){
+    const baseMs=+ui.baseInterval.value*60*1000;
+    const extendMs=+ui.extendBy.value*60*1000;
+    const reduceMs=+ui.reduceBy.value*60*1000;
+    if(score>=75) currentIntervalMs = baseMs+extendMs;
+    else if(score<=45) currentIntervalMs = Math.max(180000, baseMs-reduceMs);
+    else currentIntervalMs = baseMs;
+  }
+  function tickTimer(score){
+    if(!timerStart) return;
+    const elapsed=Date.now()-timerStart;
+    const m=Math.floor(elapsed/60000), s=Math.floor((elapsed%60000)/1000);
+    ui.timer.textContent = String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+    if(elapsed>=currentIntervalMs && Date.now()-lastAlert>30000){ beep(); lastAlert=Date.now(); timerStart=Date.now(); }
+  }
+
+  function drawLm(lm,image){
+    ui.canvas.width=image.width; ui.canvas.height=image.height;
+    ctx.drawImage(image,0,0,ui.canvas.width,ui.canvas.height);
+    if (!lm) return;
+    try{ drawConnectors(ctx, lm, Pose.POSE_CONNECTIONS, {color:'#334155', lineWidth:3}); }catch{}
+    try{ drawLandmarks(ctx, [lm[11],lm[12],lm[23],lm[24],lm[25],lm[26],lm[27],lm[28]], {color:'#93c5fd', radius:3}); }catch{}
+  }
+
+  async function initPose(){
+    pose = new Pose.Pose({ locateFile: f => `https://unpkg.com/@mediapipe/pose@0.5.1675469404/${f}` });
+    pose.setOptions({ modelComplexity:1, smoothLandmarks:true, enableSegmentation:false, minDetectionConfidence:0.6, minTrackingConfidence:0.6 });
+    pose.onResults(onResults);
+  }
+  function onResults(results){
+    drawLm(results.image && results.poseLandmarks ? results.poseLandmarks : null, results.image || ui.canvas);
+    const lm = results.poseLandmarks;
+    if(lm){
+      const baseCm=estimateBaseWidth(lm);
+      const lumbarDeg=lumbarAngle(lm);
+      const shiftPct=lateralShift(lm);
+      ui.kBase.textContent = baseCm? Math.round(baseCm)+' cm':'--';
+      ui.kLumbar.textContent = lumbarDeg? lumbarDeg+'°':'--';
+      ui.kShift.textContent = shiftPct!=null? shiftPct+'%':'--';
+      const targets={ baseCm:+ui.targetBase.value, maxFlexDeg:+ui.maxFlex.value };
+      const score = postureScore({baseCm,lumbarDeg,shiftPct}, targets);
+      setAdaptiveInterval(score);
+      ui.suggestion.textContent = chooseSuggestion({baseCm,lumbarDeg,shiftPct}, targets);
+      tickTimer(score);
+    } else {
+      ui.suggestion.textContent = "Get shoulders, hips, knees, ankles in frame.";
+    }
+  }
+
+  async function start(){
+    if(running) return;
+    ok("Requesting camera… If no prompt appears, set Safari permission to Allow.");
+    try{
+      const rear = { video: { facingMode: { exact: "environment" } }, audio:false };
+      const front = { video: { facingMode: "user" }, audio:false };
+      let stream;
+      try { stream = await navigator.mediaDevices.getUserMedia(rear); }
+      catch { stream = await navigator.mediaDevices.getUserMedia(front); }
+      ui.video.srcObject = stream; await ui.video.play();
+
+      await initPose();
+      camera = new Camera(ui.video, { onFrame: async () => { await pose.send({ image: ui.video }); }, width: 720, height: 960 });
+      camera.start();
+
+      running = true; timerStart = Date.now(); lastAlert = 0;
+      ok("Camera running. Position yourself ~1.5–2m away at ~45°.");
+    } catch(e){
+      err("Camera failed: " + (e && e.message ? e.message : e));
+      err("Fix: aA → Website Settings → Camera → Allow, then reload.");
+    }
+  }
+
+  function stop(){
+    if(!running) return;
+    running=false;
+    try{
+      camera && camera.stop && camera.stop();
+      const s = ui.video.srcObject; if(s) s.getTracks().forEach(t=>t.stop());
+      ui.video.srcObject = null;
+      ok("Stopped.");
+    }catch(e){ err("Stop error: " + e); }
+  }
+
+  ui.startBtn.addEventListener('click', start, {passive:true});
+  ui.stopBtn.addEventListener('click', stop, {passive:true});
+  ui.resetBtn.addEventListener('click', ()=>{ timerStart = Date.now(); beep(); ok("Timer reset."); }, {passive:true});
+
+  // Register SW (okay if it fails)
+  if ('serviceWorker' in navigator){
+    window.addEventListener('load', ()=>{
+      navigator.serviceWorker.register('./sw.js?v=9').catch(e=>console.warn('SW error', e));
+    });
+  }
+
+  updateLastLog();
+  console.log("JS boot OK v0.3");
+})();
+</script>
+</body>
+</html>
