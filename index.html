@@ -1,4 +1,3 @@
-
 <!doctype html>
 <html lang="en">
 <head>
@@ -12,9 +11,8 @@
 <link rel="stylesheet" href="style.css" />
 
 <!-- MediaPipe libs (cache-busted) -->
-<script src="https://unpkg.com/@mediapipe/camera_utils@0.3.1675466864/camera_utils.js?v=9"></script>
-<script src="https://unpkg.com/@mediapipe/drawing_utils@0.3.1675466864/drawing_utils.js?v=9"></script>
-<script src="https://unpkg.com/@mediapipe/pose@0.5.1675469404/pose.js?v=9"></script>
+<script src="https://unpkg.com/@mediapipe/drawing_utils@0.3.1675466864/drawing_utils.js?v=12"></script>
+<script src="https://unpkg.com/@mediapipe/pose@0.5.1675469404/pose.js?v=12"></script>
 
 <style>
   header { position: sticky; top: 0; background:#0f1115; z-index: 10; }
@@ -23,6 +21,10 @@
   #status.err{ background:#2b1616; color:#ffd7d7; border:1px solid #5c1f1f; }
   .topButtons{ display:flex; gap:8px; padding:0 12px; margin-top:-4px }
   .topButtons .btn{ flex:1; }
+  /* show the video; we draw overlays on a canvas stacked above it */
+  #preview { position: relative; }
+  #video { width: 100%; border-radius: 12px; background: #000; }
+  #canvas { position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; }
 </style>
 </head>
 <body>
@@ -34,7 +36,7 @@
   </label>
 </header>
 
-<div id="status" class="ok">v0.3 — JS loaded. Tap <b>Start</b> to request camera.</div>
+<div id="status" class="ok">v0.4 — JS loaded. Tap <b>Start</b> to request camera.</div>
 <div class="topButtons">
   <button id="startBtn" class="btn accent">Start</button>
   <button id="stopBtn" class="btn">Stop</button>
@@ -43,7 +45,7 @@
 
 <main>
   <div id="preview" class="card">
-    <video id="video" playsinline style="display:none"></video>
+    <video id="video" playsinline muted></video>
     <canvas id="canvas"></canvas>
   </div>
 
@@ -104,7 +106,7 @@
     </ul>
   </div>
 </main>
-<footer>v0.3 prototype · On-device processing · For guidance only</footer>
+<footer>v0.4 prototype · On-device processing · For guidance only</footer>
 
 <script>
 (function(){
@@ -135,7 +137,7 @@
   const ok = msg => { ui.status.className='ok'; ui.status.innerHTML = msg; }
   const err = msg => { ui.status.className='err'; ui.status.innerHTML = '⚠️ ' + msg; console.error(msg); }
 
-  // WebAudio beep (works after user gesture)
+  // Beep
   let ac;
   function beep(){
     if (!ui.soundToggle.checked) return;
@@ -199,8 +201,8 @@
     return "Hold steady. Small adjustments only.";
   }
 
-  // Pose pipeline
-  let pose, camera, running=false, timerStart=null, lastAlert=0, currentIntervalMs=0;
+  // Pose pipeline (RAF loop — no MediaPipe Camera helper)
+  let pose, running=false, timerStart=null, lastAlert=0, currentIntervalMs=0, rafId=null;
 
   function setAdaptiveInterval(score){
     const baseMs=+ui.baseInterval.value*60*1000;
@@ -218,23 +220,18 @@
     if(elapsed>=currentIntervalMs && Date.now()-lastAlert>30000){ beep(); lastAlert=Date.now(); timerStart=Date.now(); }
   }
 
-  function drawLm(lm,image){
-    ui.canvas.width=image.width; ui.canvas.height=image.height;
-    ctx.drawImage(image,0,0,ui.canvas.width,ui.canvas.height);
-    if (!lm) return;
-    try{ drawConnectors(ctx, lm, Pose.POSE_CONNECTIONS, {color:'#334155', lineWidth:3}); }catch{}
-    try{ drawLandmarks(ctx, [lm[11],lm[12],lm[23],lm[24],lm[25],lm[26],lm[27],lm[28]], {color:'#93c5fd', radius:3}); }catch{}
-  }
+  function drawResults(results){
+    const v = ui.video;
+    ui.canvas.width = v.videoWidth || v.clientWidth;
+    ui.canvas.height = v.videoHeight || v.clientHeight;
+    ctx.drawImage(v, 0, 0, ui.canvas.width, ui.canvas.height);
 
-  async function initPose(){
-    pose = new Pose.Pose({ locateFile: f => `https://unpkg.com/@mediapipe/pose@0.5.1675469404/${f}` });
-    pose.setOptions({ modelComplexity:1, smoothLandmarks:true, enableSegmentation:false, minDetectionConfidence:0.6, minTrackingConfidence:0.6 });
-    pose.onResults(onResults);
-  }
-  function onResults(results){
-    drawLm(results.image && results.poseLandmarks ? results.poseLandmarks : null, results.image || ui.canvas);
     const lm = results.poseLandmarks;
     if(lm){
+      // overlay landmarks
+      try{ drawConnectors(ctx, lm, Pose.POSE_CONNECTIONS, {color:'#334155', lineWidth:3}); }catch{}
+      try{ drawLandmarks(ctx, [lm[11],lm[12],lm[23],lm[24],lm[25],lm[26],lm[27],lm[28]], {color:'#93c5fd', radius:3}); }catch{}
+
       const baseCm=estimateBaseWidth(lm);
       const lumbarDeg=lumbarAngle(lm);
       const shiftPct=lateralShift(lm);
@@ -251,23 +248,38 @@
     }
   }
 
+  async function loop(){
+    if (!running) return;
+    try{
+      await pose.send({ image: ui.video });
+      rafId = requestAnimationFrame(loop);
+    } catch(e){
+      err("Pose loop error: " + e);
+      running = false;
+    }
+  }
+
   async function start(){
     if(running) return;
-    ok("Requesting camera… If no prompt appears, set Safari permission to Allow.");
+    ok("Requesting camera… If no prompt, set Safari permission to Allow.");
     try{
       const rear = { video: { facingMode: { exact: "environment" } }, audio:false };
       const front = { video: { facingMode: "user" }, audio:false };
       let stream;
       try { stream = await navigator.mediaDevices.getUserMedia(rear); }
       catch { stream = await navigator.mediaDevices.getUserMedia(front); }
-      ui.video.srcObject = stream; await ui.video.play();
 
-      await initPose();
-      camera = new Camera(ui.video, { onFrame: async () => { await pose.send({ image: ui.video }); }, width: 720, height: 960 });
-      camera.start();
+      ui.video.srcObject = stream;
+      ui.video.muted = true; // iOS autoplay requires muted
+      await ui.video.play();
+
+      pose = new Pose.Pose({ locateFile: f => `https://unpkg.com/@mediapipe/pose@0.5.1675469404/${f}` });
+      pose.setOptions({ modelComplexity:1, smoothLandmarks:true, enableSegmentation:false, minDetectionConfidence:0.6, minTrackingConfidence:0.6 });
+      pose.onResults(drawResults);
 
       running = true; timerStart = Date.now(); lastAlert = 0;
       ok("Camera running. Position yourself ~1.5–2m away at ~45°.");
+      loop();
     } catch(e){
       err("Camera failed: " + (e && e.message ? e.message : e));
       err("Fix: aA → Website Settings → Camera → Allow, then reload.");
@@ -278,7 +290,7 @@
     if(!running) return;
     running=false;
     try{
-      camera && camera.stop && camera.stop();
+      rafId && cancelAnimationFrame(rafId);
       const s = ui.video.srcObject; if(s) s.getTracks().forEach(t=>t.stop());
       ui.video.srcObject = null;
       ok("Stopped.");
@@ -289,15 +301,8 @@
   ui.stopBtn.addEventListener('click', stop, {passive:true});
   ui.resetBtn.addEventListener('click', ()=>{ timerStart = Date.now(); beep(); ok("Timer reset."); }, {passive:true});
 
-  // Register SW (okay if it fails)
-  if ('serviceWorker' in navigator){
-    window.addEventListener('load', ()=>{
-      navigator.serviceWorker.register('./sw.js?v=9').catch(e=>console.warn('SW error', e));
-    });
-  }
-
   updateLastLog();
-  console.log("JS boot OK v0.3");
+  console.log("JS boot OK v0.4");
 })();
 </script>
 </body>
