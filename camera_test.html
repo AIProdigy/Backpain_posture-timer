@@ -1,0 +1,25 @@
+<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Camera Test</title>
+<body style="background:#111;color:#eee;font-family:system-ui;margin:0;padding:16px">
+<h2>Camera Test</h2>
+<p>Tap Start to request the camera. If you see no prompt, change Safari site permissions.</p>
+<button id="start">Start</button>
+<video id="v" playsinline style="width:100%;margin-top:12px;border:1px solid #333;border-radius:12px;background:#000"></video>
+<pre id="log" style="white-space:pre-wrap;background:#181c27;padding:8px;border-radius:8px;margin-top:12px"></pre>
+<script>
+const log = m => (document.getElementById('log').textContent = m);
+document.getElementById('start').onclick = async () => {
+  log('Requesting camera…');
+  try{
+    const rear = { video: { facingMode: { exact: "environment" } }, audio:false };
+    const front = { video: { facingMode: "user" }, audio:false };
+    let s;
+    try { s = await navigator.mediaDevices.getUserMedia(rear); }
+    catch { s = await navigator.mediaDevices.getUserMedia(front); }
+    const v = document.getElementById('v');
+    v.srcObject = s; await v.play();
+    log('✅ Camera running. If you see video here, permissions are fine.');
+  }catch(e){ log('⚠️ Camera failed: ' + (e && e.message ? e.message : e)); }
+};
+</script>
+</body>
