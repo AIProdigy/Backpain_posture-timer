@@ -10,9 +10,20 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <title>Posture & Sitting Timer</title>
 <link rel="stylesheet" href="style.css">
+
+<!-- MediaPipe libs -->
 <script src="https://unpkg.com/@mediapipe/camera_utils@0.3.1675466864/camera_utils.js"></script>
 <script src="https://unpkg.com/@mediapipe/drawing_utils@0.3.1675466864/drawing_utils.js"></script>
 <script src="https://unpkg.com/@mediapipe/pose@0.5.1675469404/pose.js"></script>
+<style>
+  /* small tweak so the controls are above the fold on iPhone */
+  header { position: sticky; top: 0; background:#0f1115; z-index: 5; }
+  #status { padding:8px 12px; margin:0 12px 10px; border-radius:10px; font-size:13px; }
+  #status.ok{ background:#12362f; color:#d7fff1; border:1px solid #245c4d; }
+  #status.err{ background:#2b1616; color:#ffd7d7; border:1px solid #5c1f1f; }
+  .topButtons{ display:flex; gap:8px; padding:0 12px 10px; }
+  .topButtons .btn{ flex:1; }
+</style>
 </head>
 <body>
 <header>
@@ -22,6 +33,13 @@
     <span class="switch"><input id="soundToggle" type="checkbox" checked><span class="slider"></span></span>
   </label>
 </header>
+
+<div id="status" class="ok">v0.2 — Ready. Tap <b>Start</b> to request camera.</div>
+<div class="topButtons">
+  <button id="startBtn" class="btn accent">Start</button>
+  <button id="stopBtn" class="btn">Stop</button>
+  <button id="resetBtn" class="btn warn">Reset</button>
+</div>
 
 <main>
   <div id="preview" class="card">
@@ -59,13 +77,8 @@
       <input id="targetBase" type="range" min="0" max="30" step="1" value="8">
     </div>
     <div class="control-grid">
-      <label class="small">Max lumbar flexion (°)</label>
+      <label class="small">Max lumbar flex (°)</label>
       <input id="maxFlex" type="range" min="5" max="40" step="1" value="20">
-    </div>
-    <div class="row" style="margin-top:8px">
-      <button id="startBtn" class="btn accent">Start</button>
-      <button id="stopBtn" class="btn">Stop</button>
-      <button id="resetBtn" class="btn warn">Reset</button>
     </div>
     <div class="small" style="margin-top:8px">
       Tip: Place your iPhone ~1.5–2m in front of you at knee height. Sit side-on (45°) so the camera sees shoulders, hips, knees, and ankles.
@@ -85,287 +98,83 @@
   <div class="card small">
     <b>Micro-resets I’ll suggest:</b>
     <ul>
-      <li><b>Narrow base realignment</b> — bring feet/knees together, re-stack ribcage over pelvis.</li>
-      <li><b>Stand + brace</b> — McGill short-stop: hinge, hands on thighs, brace, then stand tall.</li>
-      <li><b>Hook-lying breathing</b> — 2–3 min nose inhale, long exhale, keep pelvis neutral.</li>
+      <li><b>Narrow base realignment</b> — feet/knees closer, re-stack ribs over pelvis.</li>
+      <li><b>Stand + brace</b> — McGill short-stop; hinge, brace, stand tall.</li>
+      <li><b>Hook-lying breathing</b> — 2–3 minutes; neutral pelvis.</li>
     </ul>
   </div>
-
 </main>
-<footer>v0.1 prototype · All processing on-device · For guidance only</footer>
+<footer>v0.2 prototype · On-device processing · For guidance only</footer>
 
 <script>
-// --- Globals ---
-let video = document.getElementById('video');
-let canvas = document.getElementById('canvas');
-let ctx = canvas.getContext('2d');
-let pose, camera;
-let running = false;
-let timerStart = null;
-let lastAlertTime = 0;
-let currentIntervalMs = 0;
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const ui = {
+    status: $('status'),
+    video: $('video'),
+    canvas: $('canvas'),
+    kBase: $('kBase'),
+    kLumbar: $('kLumbar'),
+    kShift: $('kShift'),
+    timer: $('timer'),
+    suggestion: $('suggestion'),
+    baseInterval: $('baseInterval'),
+    extendBy: $('extendBy'),
+    reduceBy: $('reduceBy'),
+    targetBase: $('targetBase'),
+    maxFlex: $('maxFlex'),
+    soundToggle: $('soundToggle'),
+    pain: $('pain'),
+    logPain: $('logPain'),
+    lastLog: $('lastLog'),
+    startBtn: $('startBtn'),
+    stopBtn: $('stopBtn'),
+    resetBtn: $('resetBtn'),
+  };
 
-const ui = {
-  kBase: document.getElementById('kBase'),
-  kLumbar: document.getElementById('kLumbar'),
-  kShift: document.getElementById('kShift'),
-  timer: document.getElementById('timer'),
-  suggestion: document.getElementById('suggestion'),
-  baseInterval: document.getElementById('baseInterval'),
-  extendBy: document.getElementById('extendBy'),
-  reduceBy: document.getElementById('reduceBy'),
-  targetBase: document.getElementById('targetBase'),
-  maxFlex: document.getElementById('maxFlex'),
-  soundToggle: document.getElementById('soundToggle'),
-  pain: document.getElementById('pain'),
-  logPain: document.getElementById('logPain'),
-  lastLog: document.getElementById('lastLog'),
-  startBtn: document.getElementById('startBtn'),
-  stopBtn: document.getElementById('stopBtn'),
-  resetBtn: document.getElementById('resetBtn'),
-};
+  // Quick visual logger
+  const info  = (t)=>{ ui.status.className='ok'; ui.status.innerHTML=t; };
+  const error = (t)=>{ ui.status.className='err'; ui.status.innerHTML='⚠️ ' + t; console.error(t); };
 
-// Beep via WebAudio
-const AudioCtx = window.AudioContext || window.webkitAudioContext;
-let ac;
-function beep() {
-  if (!ui.soundToggle.checked) return;
-  if (!ac) ac = new AudioCtx();
-  const o = ac.createOscillator();
-  const g = ac.createGain();
-  o.type = 'sine';
-  o.frequency.setValueAtTime(880, ac.currentTime);
-  g.gain.setValueAtTime(0.001, ac.currentTime);
-  g.gain.linearRampToValueAtTime(0.08, ac.currentTime + 0.02);
-  g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + 0.3);
-  o.connect(g).connect(ac.destination);
-  o.start();
-  o.stop(ac.currentTime + 0.35);
-}
-
-// Utilities
-function fmtTime(ms){
-  const s = Math.floor(ms/1000);
-  const m = Math.floor(s/60);
-  const r = s%60;
-  return String(m).padStart(2,'0')+':'+String(r).padStart(2,'0');
-}
-
-// Store pain logs
-const store = {
-  getLogs(){ return JSON.parse(localStorage.getItem('pt_logs')||'[]');},
-  addLog(entry){ 
-    const arr = store.getLogs(); arr.push(entry);
-    localStorage.setItem('pt_logs', JSON.stringify(arr));
+  // WebAudio beep (safe on iOS after user gesture)
+  let ac;
+  function beep() {
+    if (!ui.soundToggle.checked) return;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!ac) ac = new Ctx();
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type='sine'; o.frequency.value=880;
+    g.gain.value=0.001; o.connect(g).connect(ac.destination);
+    o.start();
+    g.gain.linearRampToValueAtTime(0.08, ac.currentTime+0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime+0.3);
+    o.stop(ac.currentTime+0.35);
   }
-};
 
-function updateLastLog(){
-  const logs = store.getLogs();
-  if (logs.length===0) { ui.lastLog.textContent = "No logs yet."; return; }
-  const last = logs[logs.length-1];
-  ui.lastLog.textContent = `Last log: pain ${last.pain}/10 at ${new Date(last.ts).toLocaleString()}`;
-}
-
-ui.logPain.addEventListener('click', ()=>{
-  store.addLog({ pain: Number(ui.pain.value), ts: Date.now() });
-  updateLastLog();
-});
-
-// Posture calculations
-function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
-
-function angle(a,b,c){
-  // angle at point b from a->b and c->b
-  const ab = {x:a.x-b.x, y:a.y-b.y};
-  const cb = {x:c.x-b.x, y:c.y-b.y};
-  const dot = ab.x*cb.x + ab.y*cb.y;
-  const mag = Math.hypot(ab.x,ab.y)*Math.hypot(cb.x,cb.y);
-  if (mag===0) return 0;
-  let cos = dot/mag;
-  cos = Math.min(1, Math.max(-1, cos));
-  return (Math.acos(cos)*180/Math.PI);
-}
-
-// Estimate base width from ankles & knees in normalized space; convert to cm via heuristic
-function estimateBaseWidth(landmarks){
-  const lAnk = landmarks[27], rAnk = landmarks[28];
-  const lKnee = landmarks[25], rKnee = landmarks[26];
-  if (!lAnk || !rAnk || !lKnee || !rKnee) return null;
-  const px = (dist(lAnk,rAnk) + dist(lKnee,rKnee)) / 2; // average
-  // Heuristic: assume phone ~2m away; normalized coords scaled to canvas width; convert to cm using ~0.8 cm per pixel at this distance for 3:4 framing.
-  // This is a crude estimate; user should compare to a ruler the first time and adjust target if needed.
-  const pxToCm = 0.8;
-  return px * pxToCm;
-}
-
-// Lumbar flex proxy: angle between shoulder-hip-knee (smaller angle == more flexion when seated side-on)
-function lumbarAngle(landmarks){
-  const lSh = landmarks[11], rSh = landmarks[12];
-  const lHip = landmarks[23], rHip = landmarks[24];
-  const lKnee = landmarks[25], rKnee = landmarks[26];
-  // pick side with higher visibility
-  const leftVis = (lSh?.visibility||0)+(lHip?.visibility||0)+(lKnee?.visibility||0);
-  const rightVis = (rSh?.visibility||0)+(rHip?.visibility||0)+(rKnee?.visibility||0);
-  let sh, hip, knee;
-  if (leftVis >= rightVis){ sh=lSh; hip=lHip; knee=lKnee; } else { sh=rSh; hip=rHip; knee=rKnee; }
-  if (!sh || !hip || !knee) return null;
-  const ang = angle(sh, hip, knee);
-  return Math.round(ang);
-}
-
-// Lateral shift: hip center vs shoulder center horizontal offset
-function lateralShift(landmarks){
-  const shx = (landmarks[11]?.x + landmarks[12]?.x)/2;
-  const hipx = (landmarks[23]?.x + landmarks[24]?.x)/2;
-  if (!isFinite(shx) || !isFinite(hipx)) return null;
-  const shift = (hipx - shx) * 100; // percent of width
-  return Math.round(shift);
-}
-
-function postureScore(metrics, targets){
-  let score = 100;
-  if (metrics.baseCm != null){
-    const dev = Math.max(0, metrics.baseCm - targets.baseCm);
-    score -= Math.min(40, dev*1.2);
+  // Pain logs
+  const store = {
+    get(){ return JSON.parse(localStorage.getItem('pt_logs')||'[]'); },
+    add(x){ const a=store.get(); a.push(x); localStorage.setItem('pt_logs', JSON.stringify(a)); }
+  };
+  function updateLastLog(){
+    const a = store.get(); if (!a.length){ ui.lastLog.textContent='No logs yet.'; return; }
+    const last = a[a.length-1];
+    ui.lastLog.textContent = `Last log: pain ${last.pain}/10 at ${new Date(last.ts).toLocaleString()}`;
   }
-  if (metrics.lumbarDeg != null){
-    const over = Math.max(0, (180 - metrics.lumbarDeg) - targets.maxFlexDeg); // proxy: smaller angle => more flexion
-    score -= Math.min(40, over*1.5);
+  ui.logPain.addEventListener('click', ()=>{ store.add({pain:+ui.pain.value, ts:Date.now()}); updateLastLog(); });
+
+  // Geometry helpers
+  const ctx = ui.canvas.getContext('2d');
+  const dist = (a,b)=> Math.hypot(a.x-b.x, a.y-b.y);
+  function angle(a,b,c){
+    const ab={x:a.x-b.x,y:a.y-b.y}, cb={x:c.x-b.x,y:c.y-b.y};
+    const dot=ab.x*cb.x+ab.y*cb.y, mag=Math.hypot(ab.x,ab.y)*Math.hypot(cb.x,cb.y);
+    if (!mag) return 0; let cos=dot/mag; cos=Math.min(1,Math.max(-1,cos)); return Math.acos(cos)*180/Math.PI;
   }
-  if (metrics.shiftPct != null){
-    score -= Math.min(20, Math.abs(metrics.shiftPct)*1.2);
+  function estimateBaseWidth(lm){
+    const lA=lm[27], rA=lm[28], lK=lm[25], rK=lm[26];
+    if(!lA||!rA||!lK||!rK) return null;
+    const px=(dist(lA,rA)+dist(lK,rK))/2; const pxToCm=0.8; return px*pxToCm;
   }
-  return Math.max(0, Math.min(100, Math.round(score)));
-}
-
-function chooseSuggestion(metrics, targets){
-  if (metrics.baseCm != null && metrics.baseCm > targets.baseCm + 3){
-    return "Narrow your base: bring feet & knees closer, re-stack ribs over pelvis.";
-  }
-  if (metrics.lumbarDeg != null && (180 - metrics.lumbarDeg) > targets.maxFlexDeg + 5){
-    return "Stand + brace (McGill short-stop), then re-sit tall.";
-  }
-  if (Date.now() - (timerStart||0) > (currentIntervalMs*0.6)){
-    return "Hook-lying breathing 2–3 min: neutral pelvis, soft inhale, long exhale.";
-  }
-  return "Hold steady. Small adjustments only.";
-}
-
-// Adaptive timer update
-function setAdaptiveInterval(postureScoreVal){
-  const baseMs = Number(ui.baseInterval.value)*60*1000;
-  const extendMs = Number(ui.extendBy.value)*60*1000;
-  const reduceMs = Number(ui.reduceBy.value)*60*1000;
-  if (postureScoreVal >= 75) currentIntervalMs = baseMs + extendMs;
-  else if (postureScoreVal <= 45) currentIntervalMs = Math.max(3*60*1000, baseMs - reduceMs);
-  else currentIntervalMs = baseMs;
-}
-
-function maybeAlert(postureScoreVal){
-  if (!timerStart) return;
-  const elapsed = Date.now() - timerStart;
-  ui.timer.textContent = fmtTime(elapsed);
-  if (elapsed >= currentIntervalMs && Date.now() - lastAlertTime > 30000){
-    beep();
-    lastAlertTime = Date.now();
-    timerStart = Date.now(); // roll timer
-  }
-}
-
-// Init MediaPipe Pose
-async function initPose(){
-  pose = new Pose.Pose({
-    locateFile: (file) => `https://unpkg.com/@mediapipe/pose@0.5.1675469404/${file}`
-  });
-  pose.setOptions({
-    modelComplexity: 1, smoothLandmarks: true, enableSegmentation: false,
-    minDetectionConfidence: 0.6, minTrackingConfidence: 0.6
-  });
-  pose.onResults(onResults);
-}
-
-function drawLandmarks(landmarks){
-  if (!landmarks) return;
-  drawConnectors(ctx, landmarks, Pose.POSE_CONNECTIONS, {color:'#334155', lineWidth:3});
-  drawLandmarksLib(ctx, [landmarks[11],landmarks[12],landmarks[23],landmarks[24],landmarks[25],landmarks[26],landmarks[27],landmarks[28]], {color:'#93c5fd', lineWidth: 0, radius: 3});
-}
-const drawLandmarksLib = window.drawLandmarks;
-
-function onResults(results){
-  canvas.width = results.image.width;
-  canvas.height = results.image.height;
-  ctx.save();
-  ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
-
-  const lm = results.poseLandmarks;
-  if (lm){
-    drawLandmarks(lm);
-    const baseCm = estimateBaseWidth(lm);
-    const lumbarDeg = lumbarAngle(lm);
-    const shiftPct = lateralShift(lm);
-    ui.kBase.textContent = baseCm? Math.round(baseCm)+' cm':'--';
-    ui.kLumbar.textContent = lumbarDeg? lumbarDeg+'°':'--';
-    ui.kShift.textContent = shiftPct!=null? shiftPct+'%':'--';
-
-    const targets = { baseCm: Number(ui.targetBase.value), maxFlexDeg: Number(ui.maxFlex.value) };
-    const score = postureScore({baseCm, lumbarDeg, shiftPct}, targets);
-    setAdaptiveInterval(score);
-    ui.suggestion.textContent = chooseSuggestion({baseCm, lumbarDeg, shiftPct}, targets);
-    maybeAlert(score);
-  } else {
-    ui.suggestion.textContent = "Position yourself in frame so I can see shoulders, hips, knees, and ankles.";
-  }
-  ctx.restore();
-}
-
-async function start(){
-  if (running) return;
-  running = true;
-  await initPose();
-  const rear = { facingMode: { exact: "environment" } };
-  const front = { facingMode: "user" };
-  let constraints = rear;
-  try{
-    await navigator.mediaDevices.getUserMedia({ video: constraints });
-  } catch(e){
-    constraints = front;
-  }
-  const stream = await navigator.mediaDevices.getUserMedia({ video: constraints, audio:false });
-  video.srcObject = stream;
-  await video.play();
-  const cameraUtils = new Camera(video, {
-    onFrame: async () => {
-      await pose.send({image: video});
-    },
-    width: 720, height: 960
-  });
-  cameraUtils.start();
-  timerStart = Date.now();
-  lastAlertTime = 0;
-}
-
-function stop(){
-  running = false;
-  const s = video.srcObject;
-  if (s) s.getTracks().forEach(t=>t.stop());
-  video.srcObject = null;
-}
-
-document.getElementById('startBtn').addEventListener('click', start);
-document.getElementById('stopBtn').addEventListener('click', stop);
-document.getElementById('resetBtn').addEventListener('click', ()=>{
-  timerStart = Date.now(); beep();
-});
-
-// PWA
-if ('serviceWorker' in navigator){
-  window.addEventListener('load', ()=>{
-    navigator.serviceWorker.register('./sw.js');
-  });
-}
-
-updateLastLog();
-</script>
-</body>
-</html>
+  function lumbarAngle(lm){
+    con
